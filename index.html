@@ -241,11 +241,25 @@
   }
   .note .msg{font-weight:600; white-space:pre-wrap}
   .note .who{position:absolute; left:14px; right:14px; bottom:9px; font-size:12px; font-weight:800; color:rgba(0,0,0,.5); text-align:right}
-  .note .del{
-    position:absolute; top:5px; right:6px; width:20px; height:20px; line-height:18px; text-align:center;
-    border-radius:50%; background:rgba(0,0,0,.25); color:#fff; font-size:13px; cursor:pointer; display:none;
+  .note .del, .note .edit{
+    position:absolute; top:5px; width:20px; height:20px; line-height:18px; text-align:center;
+    border-radius:50%; background:rgba(0,0,0,.25); color:#fff; font-size:12px; cursor:pointer; display:none;
   }
-  body.admin .note .del{display:block}
+  .note .del{ right:6px }
+  .note .edit{ right:30px }
+  /* 관리자는 모든 글, 본인(같은 브라우저)은 자기 글만 버튼 노출 */
+  body.admin .note .del, body.admin .note .edit,
+  .note.mine .del, .note.mine .edit{ display:block }
+  /* 인라인 수정 UI */
+  .note.editing{ cursor:default; box-shadow:6px 12px 26px rgba(0,0,0,.5); z-index:9998 }
+  .note .edit-area{
+    width:100%; border:1px solid rgba(0,0,0,.3); border-radius:4px; padding:7px;
+    font:inherit; font-size:14px; line-height:1.4; resize:none; background:rgba(255,255,255,.75); color:inherit;
+  }
+  .note .edit-row{ display:flex; gap:6px; margin-top:7px }
+  .note .edit-row button{ flex:1; border:0; border-radius:4px; padding:6px; font-weight:800; font-size:12px; cursor:pointer; color:#fff }
+  .note .edit-save{ background:#1f7a33 }
+  .note .edit-cancel{ background:rgba(0,0,0,.3) }
   body.admin .note.pending{outline:2px dashed #ff5a5a; opacity:.8}
   .note .pendmark{display:none; position:absolute; top:5px; left:6px; font-size:10px; font-weight:800; background:#d22; color:#fff; padding:1px 5px; border-radius:4px}
   body.admin .note.pending .pendmark{display:block}
@@ -364,7 +378,7 @@
       <label style="font-size:12px;font-weight:700;color:var(--cyan)">포스트잇 색상</label>
       <div class="colors" id="colors"></div>
       <button class="submit" id="post">축하 메시지 남기기 📌</button>
-      <p class="panel-hint">붙인 뒤 포스트잇을 드래그하면 원하는 좌표로 옮길 수 있어요.</p>
+      <p class="panel-hint">붙인 뒤 드래그로 위치를 옮길 수 있어요. 내가 쓴 글은 ✎ 수정 · ✕ 삭제 버튼이 떠요 <span style="opacity:.8">(같은 브라우저 기준)</span>.</p>
     </div>
 
     <!-- 보드 -->
@@ -444,6 +458,16 @@ const LocalStore = {
   async approveAll(){ const a=this._read(); a.forEach(n=>n.status='approved'); this._write(a); }
 };
 const Store = SB ? CloudStore : LocalStore;
+
+/* ===== 소유권 — 같은 브라우저에서 본인이 쓴 글만 수정/삭제 가능 ===== */
+const MyNotes = {
+  KEY:'doit-my-notes',
+  _r(){ try{ return JSON.parse(localStorage.getItem(this.KEY)||'[]'); }catch{ return []; } },
+  _w(a){ localStorage.setItem(this.KEY, JSON.stringify(a)); },
+  has(id){ return this._r().includes(id); },
+  add(id){ const a=this._r(); if(!a.includes(id)){ a.push(id); this._w(a); } },
+  remove(id){ this._w(this._r().filter(x=>x!==id)); }
+};
 
 /* ===== 설정 ===== */
 const MODERATION = false;                 // true면 새 글은 검수 후 공개
@@ -542,19 +566,22 @@ async function render(){
 
   visible.forEach(n=>{
     const c = PALETTE[n.color] || PALETTE[0];
+    const mine = MyNotes.has(n.id);
     const el = document.createElement('div');
-    el.className = 'note' + (n.status==='pending'?' pending':'');
+    el.className = 'note' + (n.status==='pending'?' pending':'') + (mine?' mine':'');
     el.style.cssText = `left:${n.x}px;top:${n.y}px;background:${c.bg};color:${c.ink};transform:rotate(${n.rot}deg);z-index:${n.z||1}`;
     el.dataset.id = n.id;
     el.innerHTML =
       `<span class="pin"></span>`+
       `<span class="pendmark">검수대기</span>`+
+      `<span class="edit" title="수정">✎</span>`+
       `<span class="del" title="삭제">✕</span>`+
       `<div class="msg">${esc(n.msg)}</div>`+
       `<div class="who">— ${esc(n.nick)}</div>`;
     wall.appendChild(el);
     makeDraggable(el, n);
-    el.querySelector('.del').onclick = async e=>{ e.stopPropagation(); if(confirm('이 포스트잇을 삭제할까요?')){ await Store.remove(n.id); render(); toast('삭제했어요'); } };
+    el.querySelector('.del').onclick = async e=>{ e.stopPropagation(); if(confirm('이 포스트잇을 삭제할까요?')){ await Store.remove(n.id); MyNotes.remove(n.id); render(); toast('삭제했어요'); } };
+    el.querySelector('.edit').onclick = e=>{ e.stopPropagation(); startEdit(el, n); };
   });
 
   const total = all.filter(n=>n.status!=='pending').length;
@@ -568,7 +595,9 @@ async function render(){
 function makeDraggable(el, note){
   let sx,sy,ox,oy,moved=false;
   const down = e=>{
-    if (e.target.classList.contains('del')) return;
+    if (el.classList.contains('editing')) return;
+    const t = e.target;
+    if (t.closest('.edit') || t.closest('.del') || ['TEXTAREA','BUTTON','INPUT'].includes(t.tagName)) return;
     const p = e.touches?e.touches[0]:e;
     sx=p.clientX; sy=p.clientY; ox=el.offsetLeft; oy=el.offsetTop; moved=false;
     el.classList.add('dragging'); topZ++; el.style.zIndex=topZ;
@@ -595,6 +624,31 @@ function makeDraggable(el, note){
   el.addEventListener('touchstart',down,{passive:false});
 }
 
+/* ===== 본인 글 인라인 수정 ===== */
+function startEdit(el, n){
+  if (el.classList.contains('editing')) return;
+  el.classList.add('editing');
+  const msgDiv = el.querySelector('.msg');
+  const ta = document.createElement('textarea');
+  ta.className='edit-area'; ta.rows=3; ta.maxLength=80; ta.value=n.msg;
+  const row = document.createElement('div'); row.className='edit-row';
+  const save = document.createElement('button'); save.className='edit-save'; save.textContent='저장';
+  const cancel = document.createElement('button'); cancel.className='edit-cancel'; cancel.textContent='취소';
+  row.append(save, cancel);
+  msgDiv.replaceWith(ta);
+  el.querySelector('.who').before(row);
+  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  // 편집 중에는 드래그 방지
+  ['mousedown','touchstart'].forEach(ev=>{ ta.addEventListener(ev,e=>e.stopPropagation()); row.addEventListener(ev,e=>e.stopPropagation()); });
+  save.onclick = async ()=>{
+    const v = ta.value.trim();
+    if (!v){ toast('내용을 입력해 주세요'); ta.focus(); return; }
+    await Store.update(n.id, {msg:v});
+    render(); toast('수정했어요');
+  };
+  cancel.onclick = ()=> render();
+}
+
 /* ===== 새 포스트잇 ===== */
 $('#post').onclick = async ()=>{
   const nick=$('#nick').value.trim(), msg=$('#msg').value.trim();
@@ -602,12 +656,14 @@ $('#post').onclick = async ()=>{
   const pad=16,w=172,h=160;
   const maxX=Math.max(0,wall.clientWidth-w-pad), maxY=Math.max(0,wall.clientHeight-h-pad);
   topZ++;
+  const id = uid();
   await Store.add({
-    id:uid(), nick:nick||'익명', msg, color:selColor,
+    id, nick:nick||'익명', msg, color:selColor,
     x:Math.floor(pad+Math.random()*maxX), y:Math.floor(pad+Math.random()*maxY),
     rot:(Math.random()*8-4), z:topZ,
     status: MODERATION?'pending':'approved', ts:Date.now()
   });
+  MyNotes.add(id);   // 내가 쓴 글로 기록 → 이후 ✎/✕ 버튼 노출
   $('#msg').value=''; $('#msgcnt').textContent='0';
   await render();
   toast(MODERATION?'등록 완료! 검수 후 공개돼요':'축하 메시지를 남겼어요! 🎉');
